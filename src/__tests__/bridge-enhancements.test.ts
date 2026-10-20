@@ -1,0 +1,203 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import {
+  rotateLog,
+  updateBridgeHeartbeat,
+  getHeartbeatAge,
+  getBridgeHeartbeatTimestamp,
+  saveBridgeState,
+  loadBridgeState,
+} from "../engine/bridge.js";
+import type { BridgeState } from "../types.js";
+
+let tmpDir: string;
+let stateDir: string;
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tap-bridge-enh-test-"));
+  stateDir = tmpDir;
+  fs.mkdirSync(path.join(stateDir, "pids"), { recursive: true });
+  fs.mkdirSync(path.join(stateDir, "logs"), { recursive: true });
+});
+
+afterEach(() => {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// ─── Log Rotation ──────────────────────────────────────────────
+
+describe("rotateLog", () => {
+  it("rotates existing log to .prev", () => {
+    const logPath = path.join(stateDir, "logs", "bridge-codex.log");
+    fs.writeFileSync(logPath, "line 1\nline 2\n", "utf-8");
+
+    rotateLog(logPath);
+
+    expect(fs.existsSync(logPath)).toBe(false);
+    expect(fs.existsSync(`${logPath}.prev`)).toBe(true);
+    expect(fs.readFileSync(`${logPath}.prev`, "utf-8")).toBe(
+      "line 1\nline 2\n",
+    );
+  });
+
+  it("does nothing when log does not exist", () => {
+    const logPath = path.join(stateDir, "logs", "bridge-codex.log");
+    expect(() => rotateLog(logPath)).not.toThrow();
+  });
+
+  it("does nothing when log is empty", () => {
+    const logPath = path.join(stateDir, "logs", "bridge-codex.log");
+    fs.writeFileSync(logPath, "", "utf-8");
+
+    rotateLog(logPath);
+
+    // Empty log should not be rotated
+    expect(fs.existsSync(logPath)).toBe(true);
+    expect(fs.existsSync(`${logPath}.prev`)).toBe(false);
+  });
+
+  it("overwrites previous .prev file", () => {
+    const logPath = path.join(stateDir, "logs", "bridge-codex.log");
+    const prevPath = `${logPath}.prev`;
+
+    fs.writeFileSync(prevPath, "old content", "utf-8");
+    fs.writeFileSync(logPath, "new content", "utf-8");
+
+    rotateLog(logPath);
+
+    expect(fs.readFileSync(prevPath, "utf-8")).toBe("new content");
+  });
+});
+
+// ─── Heartbeat ─────────────────────────────────────────────────
+
+describe("updateBridgeHeartbeat", () => {
+  // M321: updateBridgeHeartbeat is now a no-op — runtime heartbeat.json is SSOT
+  it("is a no-op (M321 — deprecated, runtime heartbeat.json is SSOT)", () => {
+    const oldTime = "2026-01-01T00:00:00.000Z";
+    const state: BridgeState = {
+      pid: process.pid,
+      statePath: path.join(stateDir, "pids", "bridge-codex.json"),
+      lastHeartbeat: oldTime,
+    };
+    saveBridgeState(stateDir, "codex", state);
+
+    updateBridgeHeartbeat(stateDir, "codex");
+
+    // M321: state.lastHeartbeat should be unchanged (no-op)
+    const unchanged = loadBridgeState(stateDir, "codex");
+    expect(unchanged).not.toBeNull();
+    expect(unchanged!.lastHeartbeat).toBe(oldTime);
+  });
+
+  it("does not throw when no PID file exists", () => {
+    expect(() => updateBridgeHeartbeat(stateDir, "codex")).not.toThrow();
+  });
+});
+
+describe("getHeartbeatAge", () => {
+  it("prefers runtime heartbeat from the instance-specific daemon state dir", () => {
+    const runtimeStateDir = path.join(
+      tmpDir,
+      ".tmp",
+      "codex-app-server-bridge-codex",
+    );
+    fs.mkdirSync(runtimeStateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runtimeStateDir, "heartbeat.json"),
+      JSON.stringify(
+        {
+          updatedAt: new Date(Date.now() - 5 * 1000).toISOString(),
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    const state: BridgeState = {
+      pid: process.pid,
+      statePath: path.join(stateDir, "pids", "bridge-codex.json"),
+      lastHeartbeat: "2026-01-01T00:00:00.000Z",
+      runtimeStateDir,
+    };
+    saveBridgeState(stateDir, "codex", state);
+
+    const age = getHeartbeatAge(stateDir, "codex");
+    expect(age).not.toBeNull();
+    expect(age!).toBeGreaterThanOrEqual(4);
+    expect(age!).toBeLessThanOrEqual(10);
+  });
+
+  it("returns age in seconds for valid heartbeat", () => {
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const state: BridgeState = {
+      pid: process.pid,
+      statePath: path.join(stateDir, "pids", "bridge-codex.json"),
+      lastHeartbeat: fiveMinAgo,
+    };
+    saveBridgeState(stateDir, "codex", state);
+
+    const age = getHeartbeatAge(stateDir, "codex");
+    expect(age).not.toBeNull();
+    // Should be roughly 300 seconds (5 min), allow 5s tolerance
+    expect(age!).toBeGreaterThanOrEqual(295);
+    expect(age!).toBeLessThanOrEqual(305);
+  });
+
+  it("returns null when no PID file", () => {
+    expect(getHeartbeatAge(stateDir, "codex")).toBeNull();
+  });
+
+  it("returns null for invalid heartbeat date", () => {
+    const state: BridgeState = {
+      pid: process.pid,
+      statePath: path.join(stateDir, "pids", "bridge-codex.json"),
+      lastHeartbeat: "not-a-date",
+    };
+    saveBridgeState(stateDir, "codex", state);
+
+    expect(getHeartbeatAge(stateDir, "codex")).toBeNull();
+  });
+
+  it("returns 0 for very recent heartbeat", () => {
+    const state: BridgeState = {
+      pid: process.pid,
+      statePath: path.join(stateDir, "pids", "bridge-codex.json"),
+      lastHeartbeat: new Date().toISOString(),
+    };
+    saveBridgeState(stateDir, "codex", state);
+
+    const age = getHeartbeatAge(stateDir, "codex");
+    expect(age).not.toBeNull();
+    expect(age!).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("getBridgeHeartbeatTimestamp", () => {
+  it("returns the daemon heartbeat timestamp when runtime state dir is present", () => {
+    const runtimeStateDir = path.join(
+      tmpDir,
+      ".tmp",
+      "codex-app-server-bridge-codex",
+    );
+    const updatedAt = "2026-03-25T12:34:56.000Z";
+    fs.mkdirSync(runtimeStateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runtimeStateDir, "heartbeat.json"),
+      JSON.stringify({ updatedAt }, null, 2),
+      "utf-8",
+    );
+
+    saveBridgeState(stateDir, "codex", {
+      pid: process.pid,
+      statePath: path.join(stateDir, "pids", "bridge-codex.json"),
+      lastHeartbeat: "2026-01-01T00:00:00.000Z",
+      runtimeStateDir,
+    });
+
+    expect(getBridgeHeartbeatTimestamp(stateDir, "codex")).toBe(updatedAt);
+  });
+});

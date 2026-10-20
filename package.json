@@ -1,0 +1,87 @@
+{
+  "name": "@hua-labs/tap",
+  "version": "0.6.2",
+  "description": "Lightweight file-backed CLI for cross-model AI agent communication setup",
+  "bin": {
+    "tap": "bin/tap.mjs",
+    "tap-comms": "bin/tap.mjs"
+  },
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./codex-a2a": {
+      "types": "./dist/codex-a2a/index.d.mts",
+      "import": "./dist/codex-a2a/index.mjs",
+      "default": "./dist/codex-a2a/index.mjs"
+    },
+    "./codex-ipc": {
+      "types": "./dist/codex-ipc/index.d.mts",
+      "import": "./dist/codex-ipc/index.mjs",
+      "default": "./dist/codex-ipc/index.mjs"
+    },
+    "./codex-health": {
+      "types": "./dist/codex-health/index.d.mts",
+      "import": "./dist/codex-health/index.mjs",
+      "default": "./dist/codex-health/index.mjs"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "examples",
+    "AI_GUIDE.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "prepack": "pnpm run build",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  },
+  "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/node": "^25.5.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "keywords": [
+    "tap",
+    "comms",
+    "ai-agent",
+    "cross-model",
+    "mcp",
+    "claude",
+    "codex",
+    "cli"
+  ],
+  "author": "HUA Labs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HUA-Labs/tap.git"
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

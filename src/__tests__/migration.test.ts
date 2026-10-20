@@ -1,0 +1,374 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import { loadState, migrateStateV1toV2 } from "../state.js";
+import {
+  createInstanceConfig,
+  loadInstanceConfig,
+  saveInstanceConfig,
+} from "../config/instance-config.js";
+import type { TapStateV1 } from "../types.js";
+
+let tmpDir: string;
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tap-migration-test-"));
+  fs.writeFileSync(path.join(tmpDir, "package.json"), "{}", "utf-8");
+  fs.mkdirSync(path.join(tmpDir, ".tap-comms"), { recursive: true });
+});
+
+afterEach(() => {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe("migrateStateV1toV2", () => {
+  it("converts runtimes to instances with correct fields", () => {
+    const v1: TapStateV1 = {
+      schemaVersion: 1,
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-23T00:00:00.000Z",
+      commsDir: "/comms",
+      repoRoot: "/repo",
+      packageVersion: "0.1.0",
+      runtimes: {
+        codex: {
+          installed: true,
+          configPath: "/home/.codex/config.toml",
+          bridgeMode: "app-server",
+          restartRequired: false,
+          ownedArtifacts: [],
+          backupPath: "/backups/codex",
+          lastAppliedHash: "abc123",
+          lastVerifiedAt: "2026-03-23T00:00:00.000Z",
+          bridge: null,
+          warnings: [],
+        },
+        claude: {
+          installed: true,
+          configPath: "/home/.claude.json",
+          bridgeMode: "native-push",
+          restartRequired: false,
+          ownedArtifacts: [],
+          backupPath: "/backups/claude",
+          lastAppliedHash: "def456",
+          lastVerifiedAt: "2026-03-23T00:00:00.000Z",
+          bridge: null,
+          warnings: [],
+        },
+      },
+    };
+
+    const v2 = migrateStateV1toV2(v1);
+
+    // migrateStateV1toV2 returns intermediate v2 format
+    // (loadState chains v2→v3 automatically)
+    expect(v2.schemaVersion).toBeGreaterThanOrEqual(2);
+    expect(v2.instances).toBeDefined();
+    expect(Object.keys(v2.instances)).toHaveLength(2);
+
+    // Codex instance
+    const codex = v2.instances["codex"];
+    expect(codex.instanceId).toBe("codex");
+    expect(codex.runtime).toBe("codex");
+    expect(codex.defaultAgentName).toBeNull();
+    expect(codex.port).toBeNull();
+    expect(codex.installed).toBe(true);
+    expect(codex.bridgeMode).toBe("app-server");
+    expect(codex.configPath).toBe("/home/.codex/config.toml");
+
+    // Claude instance
+    const claude = v2.instances["claude"];
+    expect(claude.instanceId).toBe("claude");
+    expect(claude.runtime).toBe("claude");
+    expect(claude.bridgeMode).toBe("native-push");
+  });
+
+  it("handles empty runtimes", () => {
+    const v1: TapStateV1 = {
+      schemaVersion: 1,
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-23T00:00:00.000Z",
+      commsDir: "/comms",
+      repoRoot: "/repo",
+      packageVersion: "0.1.0",
+      runtimes: {},
+    };
+
+    const v2 = migrateStateV1toV2(v1);
+    expect(v2.schemaVersion).toBeGreaterThanOrEqual(2);
+    expect(Object.keys(v2.instances)).toHaveLength(0);
+  });
+
+  it("preserves metadata fields", () => {
+    const v1: TapStateV1 = {
+      schemaVersion: 1,
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-23T12:00:00.000Z",
+      commsDir: "/custom/comms",
+      repoRoot: "/custom/repo",
+      packageVersion: "0.2.0",
+      runtimes: {},
+    };
+
+    const v2 = migrateStateV1toV2(v1);
+    expect(v2.createdAt).toBe("2026-03-20T00:00:00.000Z");
+    expect(v2.updatedAt).toBe("2026-03-23T12:00:00.000Z");
+    expect(v2.commsDir).toBe("/custom/comms");
+    expect(v2.repoRoot).toBe("/custom/repo");
+    expect(v2.packageVersion).toBe("0.2.0");
+  });
+});
+
+describe("loadState auto-migration", () => {
+  it("auto-migrates v1 state file to v2", () => {
+    const v1State = {
+      schemaVersion: 1,
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-23T00:00:00.000Z",
+      commsDir: path.join(tmpDir, "comms"),
+      repoRoot: tmpDir,
+      packageVersion: "0.1.0",
+      runtimes: {
+        codex: {
+          installed: true,
+          configPath: "",
+          bridgeMode: "app-server",
+          restartRequired: false,
+          ownedArtifacts: [],
+          backupPath: "",
+          lastAppliedHash: "",
+          lastVerifiedAt: null,
+          bridge: null,
+          warnings: [],
+        },
+      },
+    };
+
+    fs.writeFileSync(
+      path.join(tmpDir, ".tap-comms", "state.json"),
+      JSON.stringify(v1State, null, 2),
+      "utf-8",
+    );
+
+    const loaded = loadState(tmpDir);
+    expect(loaded).not.toBeNull();
+    // v1 → v2 → v3 chain migration
+    expect(loaded!.schemaVersion).toBe(3);
+    expect(loaded!.instances).toBeDefined();
+    expect(loaded!.instances["codex"]).toBeDefined();
+    expect(loaded!.instances["codex"].instanceId).toBe("codex");
+    expect(loaded!.instances["codex"].runtime).toBe("codex");
+
+    // Should have persisted the migrated state
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, ".tap-comms", "state.json"), "utf-8"),
+    );
+    expect(persisted.schemaVersion).toBe(3);
+    expect(persisted.instances).toBeDefined();
+  });
+
+  it("loads v2 state without re-migrating", () => {
+    const v2State = {
+      schemaVersion: 2,
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-24T00:00:00.000Z",
+      commsDir: path.join(tmpDir, "comms"),
+      repoRoot: tmpDir,
+      packageVersion: "0.1.0",
+      instances: {
+        "codex-reviewer": {
+          instanceId: "codex-reviewer",
+          runtime: "codex",
+          agentName: "reviewer",
+          port: 4501,
+          installed: true,
+          configPath: "",
+          bridgeMode: "app-server",
+          restartRequired: false,
+          ownedArtifacts: [],
+          backupPath: "",
+          lastAppliedHash: "",
+          lastVerifiedAt: null,
+          bridge: null,
+          warnings: [],
+        },
+      },
+    };
+
+    fs.writeFileSync(
+      path.join(tmpDir, ".tap-comms", "state.json"),
+      JSON.stringify(v2State, null, 2),
+      "utf-8",
+    );
+
+    const loaded = loadState(tmpDir);
+    expect(loaded).not.toBeNull();
+    // v2 auto-migrates to v3
+    expect(loaded!.schemaVersion).toBe(3);
+    expect(loaded!.instances["codex-reviewer"].port).toBe(4501);
+    // v3 fields added
+    expect(loaded!.instances["codex-reviewer"].configHash).toBe("");
+    expect(loaded!.instances["codex-reviewer"].configSourceFile).toBe("");
+  });
+
+  it("reconciles stale comms metadata in state and instance config", () => {
+    const currentCommsDir = path.join(tmpDir, "hua-comms");
+    fs.writeFileSync(
+      path.join(tmpDir, "tap-config.json"),
+      JSON.stringify({ commsDir: currentCommsDir }, null, 2),
+      "utf-8",
+    );
+
+    const stateDir = path.join(tmpDir, ".tap-comms");
+    const staleState = {
+      schemaVersion: 3,
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-24T00:00:00.000Z",
+      commsDir: path.join(tmpDir, "old-comms"),
+      repoRoot: path.join(tmpDir, "old-repo"),
+      packageVersion: "0.5.2",
+      instances: {
+        codex: {
+          instanceId: "codex",
+          runtime: "codex",
+          agentName: "결",
+          port: 4501,
+          installed: true,
+          configPath: path.join(tmpDir, ".codex", "config.toml"),
+          bridgeMode: "app-server",
+          restartRequired: false,
+          ownedArtifacts: [],
+          backupPath: "",
+          lastAppliedHash: "",
+          lastVerifiedAt: null,
+          bridge: null,
+          headless: null,
+          configHash: "",
+          configSourceFile: "",
+          warnings: [],
+        },
+      },
+    };
+
+    fs.writeFileSync(
+      path.join(stateDir, "state.json"),
+      JSON.stringify(staleState, null, 2),
+      "utf-8",
+    );
+
+    const instConfig = createInstanceConfig({
+      instanceId: "codex",
+      runtime: "codex",
+      defaultAgentName: "결",
+      port: 4501,
+      appServerUrl: "ws://127.0.0.1:4501",
+      commsDir: path.join(tmpDir, "old-comms"),
+      stateDir: path.join(tmpDir, ".tap-comms-old"),
+      repoRoot: path.join(tmpDir, "old-repo"),
+    });
+    saveInstanceConfig(stateDir, instConfig);
+
+    const loaded = loadState(tmpDir);
+
+    expect(loaded).not.toBeNull();
+    expect(loaded!.commsDir).toBe(currentCommsDir);
+    expect(loaded!.repoRoot).toBe(tmpDir);
+
+    const syncedConfig = loadInstanceConfig(stateDir, "codex");
+    expect(syncedConfig).not.toBeNull();
+    expect(syncedConfig!.commsDir).toBe(currentCommsDir);
+    expect(syncedConfig!.stateDir).toBe(stateDir);
+    expect(syncedConfig!.mcpEnv.TAP_COMMS_DIR).toBe(currentCommsDir);
+    expect(syncedConfig!.mcpEnv.TAP_STATE_DIR).toBe(stateDir);
+    expect(syncedConfig!.mcpEnv.TAP_REPO_ROOT).toBe(tmpDir);
+    expect(loaded!.instances.codex.configHash).toBe(syncedConfig!.configHash);
+  });
+
+  it("reconciles stale configSourceFile paths to the current stateDir", () => {
+    const currentCommsDir = path.join(tmpDir, "hua-comms");
+    fs.writeFileSync(
+      path.join(tmpDir, "tap-config.json"),
+      JSON.stringify({ commsDir: currentCommsDir }, null, 2),
+      "utf-8",
+    );
+
+    const stateDir = path.join(tmpDir, ".tap-comms");
+    const expectedConfigSourceFile = path.join(
+      stateDir,
+      "instances",
+      "codex.json",
+    );
+    const instConfig = createInstanceConfig({
+      instanceId: "codex",
+      runtime: "codex",
+      defaultAgentName: "결",
+      port: 4501,
+      appServerUrl: "ws://127.0.0.1:4501",
+      commsDir: currentCommsDir,
+      stateDir,
+      repoRoot: tmpDir,
+    });
+    saveInstanceConfig(stateDir, instConfig);
+
+    const staleState = {
+      schemaVersion: 3,
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-24T00:00:00.000Z",
+      commsDir: currentCommsDir,
+      repoRoot: tmpDir,
+      packageVersion: "0.5.2",
+      instances: {
+        codex: {
+          instanceId: "codex",
+          runtime: "codex",
+          agentName: "결",
+          port: 4501,
+          installed: true,
+          configPath: path.join(tmpDir, ".codex", "config.toml"),
+          bridgeMode: "app-server",
+          restartRequired: false,
+          ownedArtifacts: [],
+          backupPath: "",
+          lastAppliedHash: "",
+          lastVerifiedAt: null,
+          bridge: null,
+          headless: null,
+          configHash: instConfig.configHash,
+          configSourceFile: path.join(
+            tmpDir,
+            ".tap-comms-old",
+            "instances",
+            "codex.json",
+          ),
+          warnings: [],
+        },
+      },
+    };
+
+    fs.writeFileSync(
+      path.join(stateDir, "state.json"),
+      JSON.stringify(staleState, null, 2),
+      "utf-8",
+    );
+
+    const loaded = loadState(tmpDir);
+
+    expect(loaded).not.toBeNull();
+    expect(loaded!.instances.codex.configSourceFile).toBe(
+      expectedConfigSourceFile,
+    );
+
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(stateDir, "state.json"), "utf-8"),
+    );
+    expect(persisted.instances.codex.configSourceFile).toBe(
+      expectedConfigSourceFile,
+    );
+  });
+});
+
+// M123 MCP key migration adapter-level tests are in:
+// - codex-adapter.test.ts (TOML migration via real codexAdapter.apply)
+// - gemini-adapter.test.ts (JSON migration via real geminiAdapter.apply)
+// - claude-adapter.test.ts (JSON migration via real claudeAdapter.apply)
